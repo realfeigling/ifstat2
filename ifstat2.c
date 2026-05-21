@@ -10,8 +10,9 @@
  *
  * Reduced and rewritten for mortals and forked to ifstat2
  *              Robert Olsson <robert.olsson@its.uu.se>
- * Further usability fixes: Jens Låås <jens.laas@its.uu.se>
+ * Further usability fixes: Jens LÃ¥Ã¥s <jens.laas@its.uu.se>
  *
+ * Modified: added natural interface sorting for VLAN/QinQ interface names.
  */
 
 #define VERSION "0.33"
@@ -34,6 +35,7 @@
 #include <signal.h>
 #include <math.h>
 #include <sys/types.h>
+#include <ctype.h>
 
 #include "stats64.h"
 #include "libnetlink.h"
@@ -57,10 +59,8 @@ char info_source[128];
 
 /* Keep in sync */
 
-
 #define DEFAULT_INTERVAL 1
 #define DEFAULT_TIME_CONST 5
-
 
 #define MAXS (sizeof(struct ifstats64)/sizeof(uint64_t))
 
@@ -72,7 +72,6 @@ struct ifstat_ent
 	uint64_t                val[MAXS];
 	double			rate[MAXS];
 };
-
 
 struct ifstat_ent *kern_db;
 
@@ -86,7 +85,7 @@ static int match(char *id)
 	if (npatterns == 0)
 		return 1;
 
-	for (i=0; i<npatterns; i++) {
+	for (i = 0; i < npatterns; i++) {
 		if (!fnmatch(patterns[i], id, 0))
 			return 1;
 	}
@@ -96,7 +95,7 @@ static int match(char *id)
 static int get_netstat_nlmsg(struct sockaddr_nl *who, struct nlmsghdr *m, void *arg)
 {
 	struct ifinfomsg *ifi = NLMSG_DATA(m);
-	struct rtattr * tb[IFLA_MAX+1];
+	struct rtattr *tb[IFLA_MAX+1];
 	int len = m->nlmsg_len;
 	struct ifstat_ent *n;
 	uint64_t ival[MAXS];
@@ -109,7 +108,7 @@ static int get_netstat_nlmsg(struct sockaddr_nl *who, struct nlmsghdr *m, void *
 	if (len < 0)
 		return -1;
 
-	if (!(ifi->ifi_flags&IFF_UP))
+	if (!(ifi->ifi_flags & IFF_UP))
 		return 0;
 
 	memset(tb, 0, sizeof(tb));
@@ -120,16 +119,19 @@ static int get_netstat_nlmsg(struct sockaddr_nl *who, struct nlmsghdr *m, void *
 	n = malloc(sizeof(*n));
 	if (!n)
 		abort();
+
 	n->ifindex = ifi->ifi_index;
 	n->name = strdup(RTA_DATA(tb[IFLA_IFNAME]));
+	if (!n->name)
+		abort();
+
 	memcpy(&ival, RTA_DATA(tb[IFLA_STATS64]), sizeof(ival));
-	for (i=0; i<MAXS; i++) {
+	for (i = 0; i < MAXS; i++) {
 
 #undef DO_L2_STATS
 #ifdef DO_L2_STATS
-
-		if(i == 2) n->ival[i] = n->ival[i]+4; /* RX CRC */
-		if(i == 3) n->ival[i] = n->ival[i]+18; /* TX 14+4 E-hdr + CRC */
+		if (i == 2) ival[i] = ival[i] + 4;  /* RX CRC */
+		if (i == 3) ival[i] = ival[i] + 18; /* TX 14+4 E-hdr + CRC */
 #endif
 		n->val[i] = ival[i];
 	}
@@ -137,7 +139,6 @@ static int get_netstat_nlmsg(struct sockaddr_nl *who, struct nlmsghdr *m, void *
 	kern_db = n;
 	return 0;
 }
-
 
 static void load_info(void)
 {
@@ -170,9 +171,8 @@ static void load_info(void)
 	}
 }
 
-
-/* 
-   Read data from unix socket 
+/*
+   Read data from unix socket
 */
 
 static void load_raw_table(FILE *fp)
@@ -189,6 +189,7 @@ static void load_raw_table(FILE *fp)
 		if (buf[0] == '#') {
 			buf[strlen(buf)-1] = 0;
 			strncpy(info_source, buf+1, sizeof(info_source)-1);
+			info_source[sizeof(info_source)-1] = 0;
 			continue;
 		}
 		if ((n = malloc(sizeof(*n))) == NULL)
@@ -205,14 +206,16 @@ static void load_raw_table(FILE *fp)
 		*next++ = 0;
 
 		n->name = strdup(p);
+		if (!n->name)
+			abort();
 		p = next;
 
-		for (i=0; i<MAXS; i++) {
+		for (i = 0; i < MAXS; i++) {
 			unsigned rate;
 			if (!(next = strchr(p, ' ')))
 				abort();
 			*next++ = 0;
-			if (sscanf(p, "%llu", n->val+i) != 1)
+			if (sscanf(p, "%llu", (unsigned long long *)(n->val+i)) != 1)
 				abort();
 
 			p = next;
@@ -236,23 +239,25 @@ static void load_raw_table(FILE *fp)
 	}
 }
 
-/* 
-   Write data to socket 
+/*
+   Write data to socket
 */
 
 static void dump_raw_db(FILE *fp)
 {
 	struct ifstat_ent *n;
 
-	fprintf(fp, "#ovrf=%d EWMA=%d client-pid=%u -- %s\n", 
+	fprintf(fp, "#ovrf=%d EWMA=%d client-pid=%u -- %s\n",
 		overflow, ewma, getpid(), info_source);
 
-	for (n=kern_db; n; n=n->next) {
+	for (n = kern_db; n; n = n->next) {
 		int i;
 
 		fprintf(fp, "%d %s ", n->ifindex, n->name);
-		for (i=0; i<MAXS; i++) {
-			fprintf(fp, "%llu %u ", n->val[i], (unsigned)n->rate[i]);
+		for (i = 0; i < MAXS; i++) {
+			fprintf(fp, "%llu %u ",
+				(unsigned long long)n->val[i],
+				(unsigned)n->rate[i]);
 		}
 		fprintf(fp, "\n");
 	}
@@ -261,88 +266,82 @@ static void dump_raw_db(FILE *fp)
 static void format_rate(FILE *fp, struct ifstat_ent *n, int i)
 {
 	char temp[64];
-#if 0
-	if (n->val[i] > 1024*1024*1024)
-		fprintf(fp, "%7lluM ", n->val[i]/(1024*1024));
-	else if (n->val[i] > 1024*1024)
-		fprintf(fp, "%7lluK ", n->val[i]/1024);
-	else
-		fprintf(fp, "%8llu ", n->val[i]);
 
-#endif
 	if (n->rate[i] > 1024*1024) {
 		sprintf(temp, "%uM", (unsigned)(n->rate[i]/(1024*1024)));
 		fprintf(fp, "%-11s ", temp);
 	} else if (n->rate[i] > 1024) {
 		sprintf(temp, "%uK", (unsigned)(n->rate[i]/1024));
 		fprintf(fp, "%-11s ", temp);
-	} else
+	} else {
 		fprintf(fp, "%-11u ", (unsigned)n->rate[i]);
+	}
 }
 
 static void print_head(FILE *fp)
 {
-	if(conf.noformat) {
+	if (conf.noformat) {
 		return;
 	}
-	
-	if(conf.verbose) fprintf(fp, "#%s\n", info_source);
-	if(!conf.show_errors) {
-		fprintf(fp, "%42s", "RX --------------------------");	
+
+	if (conf.verbose)
+		fprintf(fp, "#%s\n", info_source);
+
+	if (!conf.show_errors) {
+		fprintf(fp, "%42s", "RX --------------------------");
 		fprintf(fp, "%-30s\n", "   TX --------------------------");
 		return;
 	}
 
 	fprintf(fp, "%-10s ", "Interface");
 
-	fprintf(fp, "%12s", "RX Pkts" );
-	fprintf(fp, "%12s", "TX Pkts" );
-	fprintf(fp, "%12s", "RX Data" );
-	fprintf(fp, "%12s\n","TX Data" );
+	fprintf(fp, "%12s", "RX Pkts");
+	fprintf(fp, "%12s", "TX Pkts");
+	fprintf(fp, "%12s", "RX Data");
+	fprintf(fp, "%12s\n", "TX Data");
 
 	fprintf(fp, "%-10s ", "");
 	fprintf(fp, "%12s", "RX Errs");
 	fprintf(fp, "%12s", "RX Drop");
 	fprintf(fp, "%12s", "RX Over");
-	fprintf(fp, "%12s\n","RX Leng");
+	fprintf(fp, "%12s\n", "RX Leng");
 
 	fprintf(fp, "%-10s ", "");
 	fprintf(fp, "%12s", "RX Crc ");
 	fprintf(fp, "%12s", "RX Frm ");
 	fprintf(fp, "%12s", "RX Fifo");
-	fprintf(fp, "%12s\n","RX Miss");
-	
+	fprintf(fp, "%12s\n", "RX Miss");
+
 	fprintf(fp, "%-10s ", "");
 	fprintf(fp, "%12s", "TX Errs");
 	fprintf(fp, "%12s", "TX Drop");
 	fprintf(fp, "%12s", "Colli  ");
-	fprintf(fp, "%12s\n","TX Carr");
+	fprintf(fp, "%12s\n", "TX Carr");
 
 	fprintf(fp, "%-10s ", "");
 	fprintf(fp, "%12s", "TX Abrt");
 	fprintf(fp, "%12s", "TX Fifo");
 	fprintf(fp, "%12s", "TX Hbt ");
-	fprintf(fp, "%12s\n","TX Wind");
+	fprintf(fp, "%12s\n", "TX Wind");
 }
 
 static void nformat_rate(FILE *fp, double x)
 {
 	char temp[64];
 	uint64_t i = x;
-	
-	if(conf.noformat) {
-		fprintf(fp, "%llu pps ", i);
+
+	if (conf.noformat) {
+		fprintf(fp, "%llu pps ", (unsigned long long)i);
 		return;
 	}
 
 	if (i > 1500*1000)
-		sprintf(temp, "%5.3f M",
-			((double)(i/1000))/1000);
+		sprintf(temp, "%5.3f M", ((double)(i/1000))/1000);
 	else if (i > 5*1000)
-		sprintf(temp, "%7llu k", i/(1000));
+		sprintf(temp, "%7llu k", (unsigned long long)(i/1000));
 	else
-		sprintf(temp, "%7llu  ", i);
-	
+		sprintf(temp, "%7llu  ", (unsigned long long)i);
+
 	fprintf(fp, "%10s %s", temp, "pps ");
 }
 
@@ -350,7 +349,7 @@ static void nformat_bits(FILE *fp, double d)
 {
 	char temp[64];
 
-	if(conf.noformat) {
+	if (conf.noformat) {
 		fprintf(fp, "%.0f bits/s ", d*8);
 		return;
 	}
@@ -362,49 +361,48 @@ static void nformat_bits(FILE *fp, double d)
 	  Gbit = 10^9 bits
 	*/
 
-        if (d >= 125*1000*1000) 
+	if (d >= 125*1000*1000)
 		sprintf(temp, "%3.1f G", d/((1000/8)*1000*1000));
-        else if (d >= 125*1000) 
+	else if (d >= 125*1000)
 		sprintf(temp, "%3.1f M", d/((1000/8)*1000));
-        else if (d >= 128) 
+	else if (d >= 128)
 		sprintf(temp, "%3.1f k", d/(1000/8));
-        else 
+	else
 		sprintf(temp, "%4.0f  ", d*8);
 
 	fprintf(fp, "%10s %s", temp, "bit/s ");
 }
 
-
 static void print_one_if(FILE *fp, struct ifstat_ent *n)
 {
 	int i;
 
-	if(!conf.show_errors) {
+	if (!conf.show_errors) {
 
-		if(conf.noformat)
+		if (conf.noformat)
 			fprintf(fp, "%s ", n->name);
 		else
 			fprintf(fp, "%-10s ", n->name);
+
 		nformat_bits(fp, n->rate[2]);
 		nformat_rate(fp, n->rate[0]);
 		nformat_bits(fp, n->rate[3]);
 		nformat_rate(fp, n->rate[1]);
-		
-		fprintf(fp, "%s", "\n");
-		
-		return;
-	}  
 
+		fprintf(fp, "%s", "\n");
+
+		return;
+	}
 
 	fprintf(fp, "%-15s ", n->name);
-	for (i=0; i<4; i++)
+	for (i = 0; i < 4; i++)
 		format_rate(fp, n, i);
 	fprintf(fp, "\n");
 
 	fprintf(fp, "%-15s ", "");
-	format_rate(fp, n, 4); /* rx_err */
-	format_rate(fp, n, 6); /* rx_dropped */
-	format_rate(fp, n, 11);/* rx_over_err */
+	format_rate(fp, n, 4);  /* rx_err */
+	format_rate(fp, n, 6);  /* rx_dropped */
+	format_rate(fp, n, 11); /* rx_over_err */
 	format_rate(fp, n, 10); /* rx_len_err */
 	fprintf(fp, "\n");
 
@@ -414,14 +412,14 @@ static void print_one_if(FILE *fp, struct ifstat_ent *n)
 	format_rate(fp, n, 14); /* rx_fifo_err */
 	format_rate(fp, n, 15); /* rx_missed_err */
 	fprintf(fp, "\n");
-	
+
 	fprintf(fp, "%-15s ", "");
 	format_rate(fp, n, 5); /* tx_err */
 	format_rate(fp, n, 7); /* tx_dropped */
 	format_rate(fp, n, 9); /* collisons */
-	format_rate(fp, n, 17); 
+	format_rate(fp, n, 17);
 	fprintf(fp, "\n");
-	
+
 	fprintf(fp, "%-15s ", "");
 	format_rate(fp, n, 16);
 	format_rate(fp, n, 18);
@@ -430,17 +428,155 @@ static void print_one_if(FILE *fp, struct ifstat_ent *n)
 	fprintf(fp, "\n");
 }
 
+/*
+ * Natural sorting for interface names.
+ *
+ * Example order:
+ *   ge0
+ *   ge0.1000
+ *   ge0.1000.500
+ *   ge0.1490
+ *   ge0.1490.40
+ *   ge0.2060
+ *   ge0.2060.60
+ *   ge1
+ *   ge2
+ *   ge10
+ */
+static int ifname_natural_cmp(const char *a, const char *b)
+{
+	while (*a && *b) {
+		if (isdigit((unsigned char)*a) && isdigit((unsigned char)*b)) {
+			unsigned long long na = 0;
+			unsigned long long nb = 0;
+
+			while (*a == '0')
+				a++;
+			while (*b == '0')
+				b++;
+
+			while (isdigit((unsigned char)*a)) {
+				na = na * 10 + (*a - '0');
+				a++;
+			}
+
+			while (isdigit((unsigned char)*b)) {
+				nb = nb * 10 + (*b - '0');
+				b++;
+			}
+
+			if (na < nb)
+				return -1;
+			if (na > nb)
+				return 1;
+
+			continue;
+		}
+
+		if ((unsigned char)*a < (unsigned char)*b)
+			return -1;
+		if ((unsigned char)*a > (unsigned char)*b)
+			return 1;
+
+		a++;
+		b++;
+	}
+
+	if (*a)
+		return 1;
+	if (*b)
+		return -1;
+
+	return 0;
+}
+
+static int ifstat_cmp(const struct ifstat_ent *a, const struct ifstat_ent *b)
+{
+	return ifname_natural_cmp(a->name, b->name);
+}
+
+static struct ifstat_ent *merge_sorted_ifs(struct ifstat_ent *a,
+					   struct ifstat_ent *b)
+{
+	struct ifstat_ent dummy;
+	struct ifstat_ent *tail = &dummy;
+
+	dummy.next = NULL;
+
+	while (a && b) {
+		if (ifstat_cmp(a, b) <= 0) {
+			tail->next = a;
+			a = a->next;
+		} else {
+			tail->next = b;
+			b = b->next;
+		}
+
+		tail = tail->next;
+	}
+
+	tail->next = a ? a : b;
+
+	return dummy.next;
+}
+
+static void split_ifs(struct ifstat_ent *head,
+		      struct ifstat_ent **front,
+		      struct ifstat_ent **back)
+{
+	struct ifstat_ent *slow;
+	struct ifstat_ent *fast;
+
+	if (!head || !head->next) {
+		*front = head;
+		*back = NULL;
+		return;
+	}
+
+	slow = head;
+	fast = head->next;
+
+	while (fast) {
+		fast = fast->next;
+		if (fast) {
+			slow = slow->next;
+			fast = fast->next;
+		}
+	}
+
+	*front = head;
+	*back = slow->next;
+	slow->next = NULL;
+}
+
+static struct ifstat_ent *sort_ifs(struct ifstat_ent *head)
+{
+	struct ifstat_ent *a;
+	struct ifstat_ent *b;
+
+	if (!head || !head->next)
+		return head;
+
+	split_ifs(head, &a, &b);
+
+	a = sort_ifs(a);
+	b = sort_ifs(b);
+
+	return merge_sorted_ifs(a, b);
+}
 
 static void dump_kern_db(FILE *fp)
 {
 	struct ifstat_ent *n;
 
+	kern_db = sort_ifs(kern_db);
 
 	print_head(fp);
 
-	for (n=kern_db; n; n=n->next) {
+	for (n = kern_db; n; n = n->next) {
 		if (!match(n->name))
 			continue;
+
 		print_one_if(fp, n);
 	}
 }
@@ -455,58 +591,54 @@ static void update_db(int interval)
 {
 	struct ifstat_ent *n, *is_new, *ns;
 
-	
 	n = kern_db;
 	kern_db = NULL;
 
 	load_info();
 
-	is_new = kern_db; 
+	is_new = kern_db;
 	kern_db = n;
 
-	/* 
+	/*
 	   Update current as template to detect any
 	   new or removed devs.
 	*/
 	for (ns = is_new; ns; ns = ns->next) {
 
-		if(!conf.scan_interval) 
+		if (!conf.scan_interval)
 			abort();
 
 		for (n = kern_db; n; n = n->next) {
 			if (ns->ifindex == n->ifindex) {
 				int i;
 
-				for (i = 0; i < MAXS; i++) { 
+				for (i = 0; i < MAXS; i++) {
 					uint64_t diff;
 					double sample;
-					
+
 					/* Handle one overflow correctly */
 
-					if( ns->val[i] < n->val[i] ) {
-						diff = (0xFFFFFFFF - n->val[i]) + ns->val[i]; 
+					if (ns->val[i] < n->val[i]) {
+						diff = (0xFFFFFFFF - n->val[i]) + ns->val[i];
 						overflow++;
-					}
-					else 
+					} else {
 						diff = ns->val[i] - n->val[i];
+					}
 
-//					ns->ival[i] = n->ival[i]; /* For overflow check */
-//					ns->val[i]  = n->val[i];
-
-					if(interval <= conf.min_interval) {
+					if (interval <= conf.min_interval) {
 						ewma = -11;
 						ns->rate[i] = n->rate[i];
 						goto done;
 					}
-					
+
 					/* Calc rate */
-					
+
 					sample = (double)(diff*1000)/interval;
 
-                                        if (interval >= conf.scan_interval) {
-                                                ns->rate[i] =  n->rate[i]+ W*(sample-n->rate[i]);
+					if (interval >= conf.scan_interval) {
+						ns->rate[i] = n->rate[i] + W*(sample-n->rate[i]);
 						ewma = 1;
-                                        } else if (interval >= conf.time_constant) {
+					} else if (interval >= conf.time_constant) {
 						ns->rate[i] = sample;
 						ewma = 2;
 					} else {
@@ -514,7 +646,7 @@ static void update_db(int interval)
 						ns->rate[i] = n->rate[i] + w*(sample-n->rate[i]);
 						ewma = 3;
 					}
-                                        
+
 				done:;
 				}
 				break;
@@ -528,7 +660,7 @@ static void update_db(int interval)
 		kern_db = kern_db->next;
 		free(tmp->name);
 		free(tmp);
-	};
+	}
 	kern_db = is_new; /* The most recent devs from rt_netlink */
 }
 
@@ -542,17 +674,17 @@ static int poll_client(int fd)
 	p.events = POLLIN;
 
 	if (poll(&p, 1, 100) > 0
-	    && (p.revents&POLLIN)) {
-		n = read(fd, buf, sizeof(buf));
-		if(n > 0) {
+	    && (p.revents & POLLIN)) {
+		n = read(fd, buf, sizeof(buf) - 1);
+		if (n > 0) {
 			buf[n] = 0;
 			pfx = "scan_interval=";
-			if((cmd = strstr(buf, pfx))) {
+			if ((cmd = strstr(buf, pfx))) {
 				conf.scan_interval = atoi(cmd+strlen(pfx));
 				W = 1 - 1/exp(log(10)*(double)conf.scan_interval/conf.time_constant);
 			}
 			pfx = "time_constant=";
-			if((cmd = strstr(buf, pfx))) {
+			if ((cmd = strstr(buf, pfx))) {
 				conf.time_constant = atoi(cmd+strlen(pfx));
 				W = 1 - 1/exp(log(10)*(double)conf.scan_interval/conf.time_constant);
 			}
@@ -568,9 +700,9 @@ static void server_loop(int fd)
 {
 	struct timeval snaptime;
 	struct pollfd p;
-	
+
 	memset(&snaptime, 0, sizeof(snaptime));
-	
+
 	p.fd = fd;
 	p.events = p.revents = POLLIN;
 
@@ -584,13 +716,12 @@ static void server_loop(int fd)
 		gettimeofday(&now, NULL);
 		tdiff = T_DIFF(now, snaptime);
 
-//		if (tdiff >= 0) { 
-			update_db(tdiff);
-			snaptime = now;
-			tdiff = 0;
-//		}
+		update_db(tdiff);
+		snaptime = now;
+		tdiff = 0;
+
 		if (poll(&p, 1, conf.scan_interval-tdiff) > 0
-		    && (p.revents&POLLIN)) {
+		    && (p.revents & POLLIN)) {
 			int clnt = accept(fd, NULL, NULL);
 
 			if (clnt >= 0) {
@@ -604,13 +735,13 @@ static void server_loop(int fd)
 
 				gettimeofday(&now, NULL);
 				tdiff = T_DIFF(now, snaptime);
-//				if (tdiff >= min_interval) {
-					update_db(tdiff);
-					snaptime = now;
-					tdiff = 0;
-//				}
+
+				update_db(tdiff);
+				snaptime = now;
+				tdiff = 0;
+
 				poll_client(clnt);
-				
+
 				sprintf(info_source,
 					"pid=%d sampling_interval=%d "
 					"time_const=%d",
@@ -622,7 +753,7 @@ static void server_loop(int fd)
 					close(clnt);
 				} else if ((pid = fork()) != 0) {
 
-					if (pid>0) 
+					if (pid > 0)
 						children++;
 					close(clnt);
 				} else {
@@ -656,26 +787,26 @@ static void usage(void) __attribute__((noreturn));
 
 static void usage(void)
 {
-        fprintf(stderr,
+	fprintf(stderr,
 "Usage: ifstat2 [ -h?vVzrnasd:t: ] [ PATTERN [ PATTERN ] ]\n"
-                );
+		);
 
-        fprintf(stderr, " client options:\n");
-        fprintf(stderr, "  -e extended statistics\n");
-        fprintf(stderr, "  -f foreground\n");
-        fprintf(stderr, "  -v print version\n");
-        fprintf(stderr, "  -i verbose info\n");
-        fprintf(stderr, "  -n disable formatting of output\n");
-        fprintf(stderr, "  -h this help\n");
+	fprintf(stderr, " client options:\n");
+	fprintf(stderr, "  -e extended statistics\n");
+	fprintf(stderr, "  -f foreground\n");
+	fprintf(stderr, "  -v print version\n");
+	fprintf(stderr, "  -i verbose info\n");
+	fprintf(stderr, "  -n disable formatting of output\n");
+	fprintf(stderr, "  -h this help\n");
 
-        fprintf(stderr, " daemon options;\n");
-        fprintf(stderr, "  -d SECS -- scan interval in SECS seconds and daemonize\n");
-        fprintf(stderr, "  -t SECS -- time constant for average calc [60] (t>d)\n");
+	fprintf(stderr, " daemon options;\n");
+	fprintf(stderr, "  -d SECS -- scan interval in SECS seconds and daemonize\n");
+	fprintf(stderr, "  -t SECS -- time constant for average calc [60] (t>d)\n");
 
-        exit(-1);
+	exit(-1);
 }
 
-int connect_server() 
+int connect_server()
 {
 	int fd;
 	struct sockaddr_un sun;
@@ -687,23 +818,22 @@ int connect_server()
 	sun.sun_path[0] = 0;
 	sprintf(sun.sun_path+1, "ifstat%dv" VERSION, getuid());
 
-	if((fd = socket(AF_UNIX, SOCK_STREAM, 0))==-1)
+	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)
 		return -1;
-	
-	if(connect(fd, (struct sockaddr*)&sun, sizeof(sun))) {
+
+	if (connect(fd, (struct sockaddr*)&sun, sizeof(sun))) {
 		strcpy(sun.sun_path+1, "ifstat0");
-		if(connect(fd, (struct sockaddr*)&sun, sizeof(sun))) {
+		if (connect(fd, (struct sockaddr*)&sun, sizeof(sun))) {
 			close(fd);
 			return -1;
 		}
-
 	}
-	if(verify_forging(fd)) {
+	if (verify_forging(fd)) {
 		printf("Forged server!\n");
 		close(fd);
 		exit(1);
 	}
-	
+
 	return fd;
 }
 
@@ -719,9 +849,9 @@ int server()
 	sun.sun_path[0] = 0;
 	sprintf(sun.sun_path+1, "ifstat%dv" VERSION, getuid());
 
-	if (conf.scan_interval == 0) 
-		conf.scan_interval = DEFAULT_INTERVAL; 
-		
+	if (conf.scan_interval == 0)
+		conf.scan_interval = DEFAULT_INTERVAL;
+
 	if (conf.time_constant == 0)
 		conf.time_constant = DEFAULT_TIME_CONST;
 
@@ -737,23 +867,23 @@ int server()
 		perror("ifstat: listen");
 		return -1;
 	}
-	if(!conf.foreground) {
+	if (!conf.foreground) {
 		if (fork()) {
 			/* parent */
 			close(fd);
-			
+
 			/* clear settings, already used by daemon */
 			conf.time_constant = conf.scan_interval = 0;
 			return 0;
 		}
 	}
-	
+
 	conf.time_constant *= 1000;
-	conf.scan_interval *= 1000; 
+	conf.scan_interval *= 1000;
 	W = 1 - 1/exp(log(10)*(double)conf.scan_interval/conf.time_constant);
-	
+
 	chdir("/");
-	if(!conf.foreground) {
+	if (!conf.foreground) {
 		close(0); close(1); close(2);
 		setsid();
 	}
@@ -770,13 +900,13 @@ int push_config(int fd)
 
 	p = buf;
 	*p = 0;
-	if(conf.time_constant) {
+	if (conf.time_constant) {
 		n = sprintf(p, "time_constant=%d\n", conf.time_constant*1000);
-		p+=n;
+		p += n;
 	}
-	if(conf.scan_interval) {
+	if (conf.scan_interval) {
 		n = sprintf(p, "scan_interval=%d\n", conf.scan_interval*1000);
-		p+=n;
+		p += n;
 	}
 	write(fd, buf, strlen(buf));
 	return 0;
@@ -788,9 +918,9 @@ int main(int argc, char *argv[])
 	int fd;
 
 	conf.min_interval = 20;
-	
+
 	while ((ch = getopt(argc, argv, "h?vVfid:t:ern")) != EOF) {
-		switch(ch) {
+		switch (ch) {
 
 		case 'n':
 			conf.noformat++;
@@ -812,7 +942,6 @@ int main(int argc, char *argv[])
 			}
 			break;
 
-			
 		case 'i':
 			conf.verbose++;
 			break;
@@ -835,35 +964,35 @@ int main(int argc, char *argv[])
 	patterns = argv;
 	npatterns = argc;
 
-	while(1) {
+	while (1) {
 		fd = connect_server();
-		if(fd >= 0) {
+		if (fd >= 0) {
 			FILE *sfp;
-		
-			if( conf.time_constant || conf.scan_interval) {
+
+			if (conf.time_constant || conf.scan_interval) {
 				push_config(fd);
 			} else {
 				write(fd, "nop\n", 4);
 			}
 
 			sfp = fdopen(fd, "r");
-			
+
 			/* Read from daemon */
-			
-			if(sfp) {
+
+			if (sfp) {
 				load_raw_table(sfp);
 				fclose(sfp);
 				dump_kern_db(stdout);
 			}
 			exit(0);
 		}
-		
-		/* 
+
+		/*
 		 * No socket just start daemon
 		 */
-		if(server())
+		if (server())
 			break;
 	}
-	
+
 	exit(1);
 }
