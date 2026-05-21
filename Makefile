@@ -2,9 +2,10 @@
 # Robert Olsson 040130
 #
 CFLAGS=  -g -Os -D_GNU_SOURCE
-CC=$(DIET) musl-gcc-x86_32
+CC=$(DIET) musl-gcc
 
-CFLAGS += -Wall -static
+
+CFLAGS += -g -Os -D_GNU_SOURCE -Wall -include stdint.h -idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu
 
 LIBS= -lm
 
